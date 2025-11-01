@@ -1,0 +1,35 @@
+// api/cakto-webhook.js
+
+export default async function handler(req, res) {
+  // Aceita só POST da Cakto para processar compra
+  if (req.method === "POST") {
+    // tenta ler o corpo
+    const body = req.body || {};
+
+    // só pra debug inicial
+    console.log("🔥 NOVO WEBHOOK CAKTO RECEBIDO:");
+    console.log(JSON.stringify(body, null, 2));
+
+    // resposta padrão pra Cakto
+    return res.status(200).json({
+      ok: true,
+      message: "Webhook recebido pela Vercel.",
+      event: body.event || null,
+      emailDetectado: body?.data?.customer?.email || null
+    });
+  }
+
+  // Qualquer GET (tipo você abrindo no navegador) só pra teste
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      note: "Endpoint ativo. Use POST aqui com o webhook da Cakto."
+    });
+  }
+
+  // Outros métodos (PUT, DELETE etc.)
+  return res.status(405).json({
+    ok: false,
+    error: "Método não permitido"
+  });
+}
