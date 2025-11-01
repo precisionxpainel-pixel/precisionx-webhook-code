@@ -1,9 +1,0 @@
-{
-  "version": 2,
-  "builds": [
-    { "src": "api/cakto-webhook.js", "use": "@vercel/node" }
-  ],
-  "routes": [
-    { "src": "/api/cakto-webhook", "dest": "api/cakto-webhook.js" }
-  ]
-}
