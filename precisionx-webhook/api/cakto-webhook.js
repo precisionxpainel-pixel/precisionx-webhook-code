@@ -1,95 +1,152 @@
-import express from "express";
-import cors from "cors";
-import admin from "firebase-admin";
+// api/cakto-webhook.js
+
 import nodemailer from "nodemailer";
+import admin from "firebase-admin";
 
-// Inicializa o Express
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// 🔐 Inicializa o Firebase Admin
+// --- 1. Inicializa Firebase Admin (só uma vez)
 if (!admin.apps.length) {
-  try {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    console.log("🔥 Firebase inicializado com sucesso!");
-  } catch (error) {
-    console.error("Erro ao inicializar Firebase:", error);
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+
+  if (!serviceAccountJson) {
+    console.error("FIREBASE_SERVICE_ACCOUNT_KEY ausente nas variáveis de ambiente!");
   }
+
+  const serviceAccount = JSON.parse(serviceAccountJson);
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
 }
 
-// 🔔 Rota principal do webhook
-app.post("/api/cakto-webhook", async (req, res) => {
-  try {
-    const { event, data, secret } = req.body;
+const auth = admin.auth();
 
-    // 🔒 Verificação do segredo
-    if (secret !== process.env.ALLOWED_SECRET) {
-      return res.status(401).json({ ok: false, message: "Unauthorized" });
+// --- 2. Transporter de e-mail (ajusta com seu remetente real)
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.MAIL_USER, // ex: precisionxpainel@gmail.com
+    pass: process.env.MAIL_PASS  // senha de app
+  },
+});
+
+// --- 3. Função handler principal
+export default async function handler(req, res) {
+  // Liberar CORS básico pra Cakto poder bater
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS, GET");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).json({ ok: true, preflight: true });
+  }
+
+  // GET = healthcheck
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      message: "Webhook ativo e pronto para receber POST da Cakto 🚀",
+    });
+  }
+
+  // Só aceito POST pra criar usuário/enviar e-mail
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Método não permitido" });
+  }
+
+  try {
+    // A Cakto manda { data: {...}, event: "...", secret: "..." }
+    const { data, event, secret } = req.body || {};
+
+    // 1. Checar segredo
+    if (secret !== process.env.CAKTO_SECRET) {
+      console.warn("Segredo inválido recebido:", secret);
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
     }
 
-    // 🛒 Se o evento for uma compra aprovada:
-    if (event === "purchase_approved") {
-      const email = data?.customer?.email;
-      const productName = data?.product?.name;
-
-      // ✅ Cria ou atualiza usuário no Firebase
-      let userRecord;
-      try {
-        userRecord = await admin.auth().getUserByEmail(email);
-      } catch (err) {
-        userRecord = await admin.auth().createUser({ email, emailVerified: true });
-      }
-
-      // ✉️ Envia e-mail de boas-vindas (opcional)
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
-
-      const mailOptions = {
-        from: `"Lua Lash Academy" <${process.env.SMTP_USER}>`,
-        to: email,
-        subject: "Acesso liberado — Lua Lash Academy 💖",
-        html: `
-          <h2>✨ Olá, ${email.split("@")[0]}!</h2>
-          <p>Sua compra do produto <b>${productName}</b> foi aprovada com sucesso!</p>
-          <p>Agora você já tem acesso à área exclusiva.</p>
-        `,
-      };
-
-      await transporter.sendMail(mailOptions);
-
-      console.log("✅ E-mail enviado e usuário processado:", email);
+    // 2. Checar evento
+    if (event !== "purchase_approved") {
       return res.status(200).json({
         ok: true,
-        message: "Usuário processado e e-mail enviado.",
-        email,
-        productName,
+        ignored: true,
+        reason: "Evento não é purchase_approved",
+        eventRecebido: event,
       });
     }
 
-    // Caso o evento não seja "purchase_approved"
-    return res.status(200).json({ ok: true, message: "Evento ignorado." });
-  } catch (error) {
-    console.error("🔥 ERRO NO PROCESSAMENTO:", error);
-    return res.status(500).json({ ok: false, error: error.message });
+    // 3. Extrair dados principais
+    const email = data?.customer?.email;
+    const name = data?.customer?.name || "aluno(a)";
+    const productName = data?.product?.name || data?.offer?.name || "Seu Acesso";
+    const orderId = data?.id;
+    const checkoutUrl = data?.checkoutUrl;
+
+    if (!email) {
+      console.error("Nenhum e-mail no payload:", data);
+      return res.status(400).json({ ok: false, error: "Email ausente no payload" });
+    }
+
+    // 4. Criar (ou achar) usuário no Firebase Auth
+    let userRecord;
+    try {
+      // tenta achar primeiro
+      userRecord = await auth.getUserByEmail(email);
+      console.log("Usuário já existia:", userRecord.uid);
+    } catch (err) {
+      // se não existe, cria
+      userRecord = await auth.createUser({
+        email,
+        password: Math.random().toString(36).slice(2, 10), // senha aleatória simples
+        displayName: name,
+      });
+      console.log("Usuário criado:", userRecord.uid);
+    }
+
+    // 5. Enviar e-mail de boas-vindas com instruções de acesso
+    const htmlBody = `
+      <div style="font-family: sans-serif; font-size: 15px; color: #111;">
+        <h2>Bem-vindo(a) ao ${productName} 🌙</h2>
+        <p>Oi ${name}, tudo bem?</p>
+        <p>Sua compra foi confirmada com sucesso ✅</p>
+        <p>Agora você já tem acesso ao painel.</p>
+        <p><b>Área de acesso:</b><br/>
+          <a href="https://SEU-DOMINIO-DA-AREA.com/login" target="_blank">
+            https://SEU-DOMINIO-DA-AREA.com/login
+          </a>
+        </p>
+        <p>Faça login usando este e-mail: <b>${email}</b></p>
+        <p>Se for seu primeiro acesso, clique em "Esqueci minha senha"
+        para definir sua senha nova.</p>
+
+        <hr/>
+        <p>Pedido: ${orderId || "-"}<br/>
+        Checkout: ${checkoutUrl || "-"}</p>
+
+        <p>Qualquer dúvida, responde este e-mail </p>
+      </div>
+    `;
+
+    await transporter.sendMail({
+      from: `"Lua - PrecisionX" <${process.env.MAIL_USER}>`,
+      to: email,
+      subject: `Seu acesso ao ${productName} está liberado ✨`,
+      html: htmlBody,
+    });
+
+    // 6. Resposta final pra Cakto
+    return res.status(200).json({
+      ok: true,
+      message: "Usuário processado e e-mail enviado.",
+      email,
+      uid: userRecord.uid,
+      productName,
+    });
+
+  } catch (err) {
+    console.error("ERRO NO WEBHOOK:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Falha interna ao processar webhook.",
+      details: err.message,
+    });
   }
-});
-
-// 🔍 Resposta para GET (teste manual pelo navegador)
-app.get("/api/cakto-webhook", (req, res) => {
-  return res.status(200).json({
-    ok: true,
-    message: "Webhook ativo e pronto para receber POST da Cakto 🚀",
-  });
-});
-
-// Exporta o app (necessário para rodar na Vercel)
-export default app;
+}
